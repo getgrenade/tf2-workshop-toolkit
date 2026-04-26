@@ -53,13 +53,13 @@ Miscellaneous helpers that don't fit elsewhere.
 
 **Extract Cosmetic Base** — In Edit Mode, extracts selected faces into a new mesh object, applies the active asset's material, and automatically routes it to the correct LOD collection. Good for blocking out shapes from an existing reference.
 
-**Sync Jiggle Bones** — Copies jiggle bone positions and hierarchy from one armature to others. Select the source armature last (active), with target armatures also selected.
+**Sync Jiggle Bones** — Copies jiggle bone positions and hierarchy from one armature to others. (jiggle must be named jiggle_(name) or j_(name)
 
 **Export Preview FBX** — Exports flagged asset meshes (no armature, no animation) to `/bakes/<blend_name>_substance.fbx` for use in Substance Painter. Reference/library assets are included automatically.
 
-**Reproject Diffuse** — Bakes the diffuse color from a reference mesh onto the active mesh using object-space normals. Useful for transferring base color from a TF2 reference model. Shift-select the reference first, then the target, then run.
+**Reproject Diffuse** — Bakes the diffuse color from a reference mesh onto the active mesh using object-space normals. Useful for transferring base color from a TF2 reference model. Shift-select the reference first, then the target.
 
-**Generate Preview Texture** — Bakes a quick flat-color + bevel-shaded preview texture at 512px for in-game testing without a real PBR texture.
+**Generate Preview Texture** — Use only after normal map is baked. Creats diffuse and normal map in /textures/temp/ folder for quick preview with importer.
 
 ---
 
