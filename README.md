@@ -4,12 +4,12 @@ A Blender addon for the TF2 cosmetic creation pipeline. Adds panels, shortcuts, 
 
 **Blender 5.0+ required**
 
-https://github.com/getgrenade/Player-Model-Quick-Loader required for correct work of most functions.
+[Player Model Quick Loader](https://github.com/getgrenade/Player-Model-Quick-Loader) required for correct work of most functions.
 ---
 
 ## Installation
 
-1. Download the latest release zip
+1. Download the [latest release](https://github.com/getgrenade/tf2-workshop-toolkit/releases) 
 2. In Blender: `Edit → Preferences → Add-ons → Install`
 3. Select the zip and enable **Workshop Toolkit**
 
@@ -29,7 +29,7 @@ Manages the LOD collection structure for your cosmetics and handles FBX export.
 
 **All-Class** — Duplicates a registered asset into per-class variants, spacing them out along the X axis so you can work on all nine at once without them overlapping.
 
-**Export Flagged** — FBX-exports every asset you've checked for export. Meshes are merged per LOD, modifiers applied, shape keys baked, and each LOD is re-centered to world origin before export. Files land in a `/mesh/` folder next to your `.blend`. Only LOD0 includes the armature.
+**Export Flagged** — FBX-exports every asset you've checked for export. Files land in a `/mesh/` folder next to your `.blend`.
 
 **Register Selected (↺ icon)** — Scans the scene and registers any collections that match the expected naming convention but aren't in the list yet. Useful if you set up your scene manually or imported an existing project.
 
@@ -38,20 +38,18 @@ Each registered asset in the list shows:
 - **Triangle count on hover** — hover over a LOD toggle to see current tri count vs. the TF2 limit, shown as a percentage with over/under status
 - **Export flag checkbox**
 - **Bake Normal Map** button — bakes a tangent normal directly from the asset's `_lod0` and `_high` collections using the settings in the Bake Tools panel
-
-> **LOD tri limits:** lod0 = 1,400 · lod1 = 1,000 · lod2 = 700
-
+- 
 ---
 
 ### Utility Operations
 
 Miscellaneous helpers that don't fit elsewhere.
 
-**Set Armature** — Adds an Armature modifier to all selected meshes pointing at a chosen armature. If any of them already have one, it gets replaced. If there's only one armature in the scene it skips the picker dialog.
+**Set Armature** — Adds an Armature modifier to all selected meshes pointing at a chosen armature. If there is only one armature, it auto picks it.
 
-**Pose toggle button (armature icon)** — Switches all armatures in the scene between Pose and Rest position simultaneously. Also mapped to **`F4`**.
+**Pose toggle button** — Switches all armatures in the scene between Pose and Rest position simultaneously. Mapped to **`F4`**.
 
-**Extract Cosmetic Base** — In Edit Mode, extracts selected faces into a new mesh object, applies the active asset's material, and automatically routes it to the correct LOD collection. Good for blocking out shapes from an existing reference.
+**Extract Cosmetic Base** — In Edit Mode, extracts selected faces into a new mesh object, displaces it, applies the active asset's material, and automatically routes it to the correct LOD collection. Useful for copying player geometry fast.
 
 **Sync Jiggle Bones** — Copies jiggle bone positions and hierarchy from one armature to others. (jiggle must be named jiggle_(name) or j_(name)
 
@@ -78,13 +76,9 @@ Quick material operations without digging into the Shader Editor.
 - **M** — Metallic value
 - **R** — Roughness value
 - **B** — Bevel radius (only shown if the material has a Bevel node)
-
-**Right-click options on a material:**
 - Assign to selection (faces in Edit Mode, objects in Object Mode)
-- Delete material from project
 - Clean selected mesh (removes all materials from selected objects)
-
-**Clean Unused** — Removes all zero-user materials from the project (confirmation required).
+- Clean Unused (removes all zero-user materials from the project)
 
 ---
 
@@ -169,12 +163,3 @@ Available in the **Weight Tools** panel and via the **`Shift+Q`** pie menu.
 | LOD FBX exports | `<blend_dir>/mesh/<asset>_<lod>.fbx` |
 | Substance preview FBX | `<blend_dir>/bakes/<blend>_substance.fbx` |
 | Baked textures | `<blend_dir>/bakes/<name>.png` |
-
----
-
-## Notes
-
-- The addon uses Cycles for all baking. GPU rendering is enabled automatically during bakes and restored afterward.
-- All-Class variants share the same materials as the original asset — they are not duplicated.
-- Shape keys are fully supported in export; they're baked into geometry per-LOD before the FBX is written.
-- The jiggle bone sync works across multiple armatures in one pass — useful when your All-Class variants each have their own armature.
