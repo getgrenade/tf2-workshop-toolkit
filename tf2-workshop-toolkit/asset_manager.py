@@ -274,18 +274,39 @@ def _wire_normal_image_to_material(mat, image):
     nm = nodes.new("ShaderNodeNormalMap")
     nm.location  = (base_x - 250, base_y - 200)
     nm.label     = "_asset_normal_map"
-    nm.space     = "TANGENT"
-    nm.convention = "DIRECTX"
+    nm.space = "TANGENT"
+
+    if hasattr(nm, "convention"):
+        # Blender 5.1+: native DirectX mode on the Normal Map node
+        nm.convention = "DIRECTX"
+        flip_node = None
+    else:
+        # Blender 5.0 and earlier: invert green via an RGB Curves node
+        # placed between the Image Texture and the Normal Map node
+        flip_node = nodes.new("ShaderNodeRGBCurve")
+        flip_node.location = (base_x - 420, base_y - 200)
+        flip_node.label    = "_asset_normal_flip_g"
+
+        # curves[0]=C  curves[1]=G  curves[2]=R  curves[3]=B
+        g_curve = flip_node.mapping.curves[1]
+        # Default points are (0,0) and (1,1) — move them to invert the channel
+        g_curve.points[0].location = (0.0, 1.0)
+        g_curve.points[1].location = (1.0, 0.0)
+        flip_node.mapping.update()
 
     # Image Texture node
     img_node = nodes.new("ShaderNodeTexImage")
-    img_node.location    = (base_x - 570, base_y - 200)
-    img_node.label       = "_asset_normal_tex"
+    img_node.location      = (base_x - 700, base_y - 200)
+    img_node.label         = "_asset_normal_tex"
     img_node.interpolation = "Linear"
-    img_node.image       = image
+    img_node.image         = image
 
     # Wire up
-    links.new(img_node.outputs["Color"], nm.inputs["Color"])
+    if flip_node:
+        links.new(img_node.outputs["Color"], flip_node.inputs["Color"])
+        links.new(flip_node.outputs["Color"], nm.inputs["Color"])
+    else:
+        links.new(img_node.outputs["Color"], nm.inputs["Color"])
     if bsdf:
         links.new(nm.outputs["Normal"], bsdf.inputs["Normal"])
 
@@ -438,10 +459,13 @@ class TF2_OT_BakeAssetNormal(Operator):
                 img_name = f"{mat.name}_normal" if mat else "normal_bake"
                 img_groups.setdefault(img_name, []).append(bset)
 
-            # Expose first image name for composite/save buttons
+            # Expose first image name for composite/save buttons.
+            # output_name is a StringProperty — safe to set now.
+            # composite_base_pick is a dynamic EnumProperty that only accepts
+            # values present in bpy.data.images at the moment of assignment,
+            # so it must be set AFTER the bake loop creates the image.
             first_img = next(iter(img_groups), "normal_bake")
             props.output_name = first_img
-            props.composite_base_pick = first_img
 
             result = {"FINISHED"}
             for img_name, group_sets in img_groups.items():
@@ -469,6 +493,10 @@ class TF2_OT_BakeAssetNormal(Operator):
 
                 if result != {"FINISHED"}:
                     break
+
+            # Now the image exists — safe to set the enum picker.
+            if bpy.data.images.get(first_img):
+                props.composite_base_pick = first_img
 
             # Wire each unique material to its correctly-named bake image
             if result == {"FINISHED"}:
