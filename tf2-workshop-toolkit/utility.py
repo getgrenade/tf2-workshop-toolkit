@@ -1304,23 +1304,3 @@ def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
     del bpy.types.Scene.utility_expanded
-
-    """Enum items: non-eye materials on the active object that have a
-    '$basetexture [texture]' Image Texture node."""
-    obj = context.active_object
-    if not obj or obj.type != "MESH":
-        return [("NONE", "No mesh active", "")]
-    items = []
-    for slot in obj.material_slots:
-        mat = slot.material
-        if not mat or not mat.use_nodes:
-            continue
-        name_lower = mat.name.lower()
-        if "eye" in name_lower:
-            continue
-        if any(n.type == "TEX_IMAGE" and n.label.lower().startswith("$basetexture")
-               for n in mat.node_tree.nodes):
-            items.append((mat.name, mat.name, ""))
-    return items if items else [("NONE", "No $basetexture material found", "")]
-
-

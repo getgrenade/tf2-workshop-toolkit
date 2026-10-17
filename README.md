@@ -15,6 +15,35 @@ A Blender addon for the TF2 cosmetic creation pipeline. Adds panels, shortcuts, 
 
 ---
 
+## Building an installable ZIP (Windows)
+
+Double-click `build.bat`. It creates or replaces
+`dist/tf2-workshop-toolkit.zip`, containing the current add-on source with the
+folder structure Blender expects. Python cache files and development tools
+are excluded. Only Windows PowerShell is needed to build; Blender can stay closed.
+
+In Blender, open **Edit → Preferences → Add-ons**, use **Install from Disk**
+from the menu, and select the ZIP in `dist`. Enable **Workshop Toolkit**.
+When updating an installed version, save your work and restart Blender after
+installation to load the new code. Build again whenever you want a fresh ZIP.
+
+For command-line builds without the closing pause, run `build.bat --no-pause`.
+
+## Testing changes locally (Windows, Blender 5.2)
+
+Double-click `test-in-blender.cmd` to open standalone Blender 5.2 with the
+current repository copy enabled. You can also drag a `.blend` file onto the
+launcher to open it with the development add-on. The launcher uses
+`C:\Program Files\Blender Foundation\Blender 5.2\blender.exe`; edit
+`BLENDER_EXE` in the launcher if your standalone installation moves.
+
+After editing the Python source, save your Blender work, close that test
+session, and launch again to load the latest code. No ZIP creation or add-on
+reinstallation is needed. Each launch opens a separate Blender process;
+it does not update an already open session. The loader does not save
+preferences or overwrite your installed add-on. Keep your usual dependency
+add-ons enabled, including Player Model Quick Loader.
+
 ## Panels
 
 The addon lives in `View3D → Sidebar (N) → WS Toolkit`. It's split into four panels.
@@ -30,8 +59,14 @@ Manages the LOD collection structure for your cosmetics and handles FBX export.
 **All-Class** — Duplicates a registered asset into per-class variants, spacing them out along the X axis so you can work on all nine at once without them overlapping.
 
 **Export Flagged** — FBX-exports every asset you've checked for export. Files land in a `/mesh/` folder next to your `.blend`.
+Uses the rest pose for every LOD and includes the LOD0 armature even when hidden.
+Your original pose, visibility, selection, and mode are restored afterward.
 
 **Register Selected (↺ icon)** — Scans the scene and registers any collections that match the expected naming convention but aren't in the list yet. Useful if you set up your scene manually or imported an existing project.
+
+Mercs added with Player Model Quick Loader are automatically registered as BASE
+(library) assets once their `_morphs_low_lod0` collection contains a mesh.
+This works in new scenes and when opening existing files, without the register button.
 
 Each registered asset in the list shows:
 - **LOD visibility toggles** (eye icons for lod0/lod1/lod2/high)
@@ -54,6 +89,7 @@ Miscellaneous helpers that don't fit elsewhere.
 **Sync Jiggle Bones** — Copies jiggle bone positions and hierarchy from one armature to others. (jiggle must be named jiggle_(name) or j_(name)
 
 **Export Preview FBX** — Exports flagged asset meshes (no armature, no animation) to `/bakes/<blend_name>_substance.fbx` for use in Substance Painter. Reference/library assets are included automatically.
+Respects the current pose for posed previews.
 
 **Reproject Diffuse** — Bakes the diffuse color from a reference mesh onto the active mesh using object-space normals. Useful for transferring base color from a TF2 reference model. Shift-select the reference first, then the target.
 

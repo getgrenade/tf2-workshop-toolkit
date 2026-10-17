@@ -1,0 +1,4 @@
+__pycache__/
+*.py[cod]
+dist/
+/tf2-workshop-toolkit.zip
