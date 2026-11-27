@@ -176,6 +176,16 @@ def perform_material_sync(base_name, use_two_mats):
                 obj.material_slots[1].material.name = f"Z_{base_name}"
 
 
+def _activate_asset_lod0(context, name):
+    pending = [context.view_layer.layer_collection]
+    while pending:
+        layer = pending.pop()
+        if layer.collection.name == name + "_lod0":
+            context.view_layer.active_layer_collection = layer
+            return
+        pending.extend(layer.children)
+
+
 def apply_modifiers_with_shapekeys(context, obj, target_collection):
     if not obj.data.shape_keys:
         bpy.ops.object.select_all(action="DESELECT")
@@ -406,23 +416,27 @@ class TF2AssetItem(PropertyGroup):
     old_name: StringProperty()
     is_library: BoolProperty(default=False)
     do_export: BoolProperty(
-        name="Flag for Export",
+        name="Include in Export",
         default=False,
-        description="Flag this asset to be exported",
+        description="Include this asset when exporting Game FBX or Painter Preview FBX",
     )
     show_lod0: BoolProperty(
+        name="LOD0 visibility", description="Show or hide the most detailed game mesh",
         default=True,
         update=lambda s, c: sync_visibility(s, "_lod0", s.show_lod0),
     )
     show_lod1: BoolProperty(
+        name="LOD1 visibility", description="Show or hide the medium-detail game mesh",
         default=True,
         update=lambda s, c: sync_visibility(s, "_lod1", s.show_lod1),
     )
     show_lod2: BoolProperty(
+        name="LOD2 visibility", description="Show or hide the lowest-detail game mesh",
         default=True,
         update=lambda s, c: sync_visibility(s, "_lod2", s.show_lod2),
     )
     show_high: BoolProperty(
+        name="High-poly visibility", description="Show or hide the high-poly source used for baking",
         default=True,
         update=lambda s, c: sync_visibility(s, "_high", s.show_high),
     )
@@ -592,9 +606,9 @@ class TF2_OT_BakeAssetNormal(Operator):
 
 
 class TF2_OT_QuickExport(Operator):
-    """Export all flagged assets as game-ready FBX files to the /mesh/ folder."""
+    """Export checked assets and all LODs to /mesh/ beside your .blend. Uses rest pose and includes the LOD0 skeleton, even when hidden. Your scene state is restored"""
     bl_idname = "tf2.quick_export"
-    bl_label = "Quick Export Flagged"
+    bl_label = "Export Game FBX"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -671,12 +685,13 @@ class TF2_OT_QuickExport(Operator):
 
         export_assets = [item for item in context.scene.tf2_assets if item.do_export]
         if not export_assets:
-            self.report({"WARNING"}, "No assets flagged for export!")
+            self.report({"WARNING"}, "Check the export icon beside an asset, then export Game FBX.")
             return {"CANCELLED"}
 
         target_lods = ["_lod0", "_lod1", "_lod2"]
         original_active = context.view_layer.objects.active
         exported_files = 0
+        skipped = []
 
         for asset in export_assets:
             real_suffixes = get_lod_suffixes(is_library=asset.is_library)
@@ -704,6 +719,7 @@ class TF2_OT_QuickExport(Operator):
                 coll_name = asset.name + actual_suffix
                 coll = bpy.data.collections.get(coll_name)
                 if not coll:
+                    skipped.append(coll_name)
                     continue
 
                 export_coll = bpy.data.collections.new(coll_name + "_temp")
@@ -727,6 +743,7 @@ class TF2_OT_QuickExport(Operator):
 
                 if not temp_meshes:
                     bpy.data.collections.remove(export_coll)
+                    skipped.append(coll_name)
                     continue
 
                 bpy.ops.object.select_all(action="DESELECT")
@@ -845,14 +862,22 @@ class TF2_OT_QuickExport(Operator):
 
         if original_active:
             context.view_layer.objects.active = original_active
-        self.report({"INFO"}, f"TF2 Export Complete: {exported_files} files exported.")
+        if skipped:
+            self.report({"WARNING"}, "Missing or empty collections: " + ", ".join(skipped)
+                        + ". Add meshes to these LOD collections before exporting them.")
+        if not exported_files:
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Exported {exported_files} FBXs to {export_dir}")
+        if not bpy.app.background:
+            bpy.ops.tf2.export_result("INVOKE_DEFAULT", directory=export_dir,
+                                     message=f"Exported {exported_files} game FBXs")
         return {"FINISHED"}
 
 
 class TF2_OT_RegisterSelected(Operator):
-    """Register the selected object or collection as a tracked asset."""
+    """Add existing LOD collections to the asset list. Select a mesh or its collection first. Reference mercs register automatically"""
     bl_idname = "tf2.register_selected"
-    bl_label = "Register Asset"
+    bl_label = "Add Existing Collections"
     asset_name: StringProperty(name="Detected Asset")
     is_lib: BoolProperty()
     do_sync: BoolProperty(name="Sync Material Names?", default=True)
@@ -906,6 +931,7 @@ class TF2_OT_RegisterSelected(Operator):
                 break
 
         if not target_base:
+            self.report({"WARNING"}, "Select a mesh or collection with a matching <asset>_lod0 collection.")
             return {"CANCELLED"}
         self.asset_name, self.is_lib = target_base, target_lib
         if not self.is_lib:
@@ -914,9 +940,9 @@ class TF2_OT_RegisterSelected(Operator):
 
 
 class TF2_OT_InitializeAsset(Operator):
-    """Create a new asset with lod0/lod1/lod2/high collections and a starter material."""
+    """Create LOD0, LOD1, LOD2 and high-poly collections with starter materials. LOD0 becomes the active collection for new meshes"""
     bl_idname = "tf2.initialize_asset"
-    bl_label = "Initialize TF2 Asset"
+    bl_label = "New Asset"
     asset_name: StringProperty(name="Asset Name", default="cosmetic")
     use_two_mats: BoolProperty(name="Create Two Materials?", default=False)
 
@@ -955,12 +981,16 @@ class TF2_OT_InitializeAsset(Operator):
             context.scene.collection.children.link(new_col)
             new_col.color_tag = c_color
         new_item = context.scene.tf2_assets.add()
-        new_item.name, new_item.old_name = name, name
+        new_item.old_name = name
+        new_item.name = name
         collapse_all_collections()
+        _activate_asset_lod0(context, name)
+        self.report({"INFO"}, f"Created {name}. Add your cosmetic meshes to {name}_lod0.")
         return {"FINISHED"}
 
 
 class TF2_OT_DuplicateAsset(Operator):
+    """Create a separate variation of this asset's LOD meshes; optionally give it its own materials"""
     bl_idname = "tf2.duplicate_asset"
     bl_label = "Duplicate Asset Variation"
     asset_name: StringProperty()
@@ -1018,8 +1048,9 @@ class TF2_OT_DuplicateAsset(Operator):
 
 
 class TF2_OT_RemoveAsset(Operator):
+    """Delete this asset's collections and objects, plus unused mesh data and materials. Materials used elsewhere are kept"""
     bl_idname = "tf2.remove_asset"
-    bl_label = "Confirm Deletion"
+    bl_label = "Delete Asset"
     index: IntProperty()
     asset_name: StringProperty()
 
@@ -1238,7 +1269,10 @@ class TF2_OT_AllClassGenerate(Operator):
 
     @classmethod
     def poll(cls, context):
-        return any(not i.is_library for i in context.scene.tf2_assets)
+        if not any(not i.is_library for i in context.scene.tf2_assets):
+            cls.poll_message_set("Create a cosmetic with New Asset before making class variants")
+            return False
+        return True
 
     def invoke(self, context, event):
         non_lib = [i.name for i in context.scene.tf2_assets if not i.is_library]
@@ -1642,16 +1676,30 @@ class TF2_PT_MainPanel(Panel):
     bl_region_type = "UI"
     bl_category = "WS Toolkit"
 
+    def draw_header(self, context):
+        self.layout.operator("tf2.workflow_help", text="", icon="QUESTION", emboss=False).topic = "ASSETS"
+
     def draw(self, context):
         layout = self.layout
         scene = context.scene
 
         row = layout.row(align=True)
-        row.operator("tf2.initialize_asset", text="Initialize", icon="PLAY")
-        row.operator("tf2.allclass_generate", text="All-Class", icon="COMMUNITY")
-        row.operator("tf2.quick_export", text="Export Flagged", icon="EXPORT")
+        row.operator("tf2.initialize_asset", text="New Asset", icon="ADD")
+        row.operator("tf2.allclass_generate", text="All Classes", icon="COMMUNITY")
+        row.operator("tf2.quick_export", text="Game FBX", icon="EXPORT")
         row.operator("tf2.register_selected", text="", icon="FILE_REFRESH")
         layout.separator()
+
+        if not any(not item.is_library for item in scene.tf2_assets):
+            hint = layout.column(align=True)
+            hint.scale_y = 0.8
+            hint.label(text="New Asset → add meshes to LOD0.", icon="INFO")
+            if not scene.tf2_assets:
+                hint.label(text="Spawn a merc to add a BASE reference.")
+        elif not bpy.data.is_saved:
+            hint = layout.row()
+            hint.scale_y = 0.8
+            hint.label(text="Save your .blend before exporting.", icon="INFO")
 
         for index, item in enumerate(scene.tf2_assets):
             row = layout.row(align=True)
@@ -1662,7 +1710,7 @@ class TF2_PT_MainPanel(Panel):
                     icon="TRIA_DOWN" if item.show_stats else "TRIA_RIGHT",
                 )
             else:
-                row.label(text="", icon="BLANK1")
+                row.operator("tf2.workflow_help", text="BASE", emboss=False).topic = "BASE"
 
             row.prop(item, "do_export", text="", icon="EXPORT", toggle=True)
             row.operator("tf2.duplicate_asset", text="", icon="ADD").asset_name = item.name
@@ -1696,6 +1744,10 @@ class TF2_PT_MainPanel(Panel):
                 for suffix, limit_val in LOD_LIMITS.items():
                     coll = bpy.data.collections.get(item.name + suffix)
                     if coll is None:
+                        stats_row.label(text=f"LOD{suffix[-1]} missing", icon="ERROR")
+                        continue
+                    if not any(obj.type == "MESH" for obj in coll.objects):
+                        stats_row.label(text=f"LOD{suffix[-1]} empty", icon="INFO")
                         continue
                     count = _tri_count(coll)
                     over  = count > limit_val

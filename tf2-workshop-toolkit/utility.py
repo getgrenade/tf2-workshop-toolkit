@@ -7,7 +7,7 @@ and temp diffuse texture generation for in-game preview.
 import bpy
 import os
 import numpy as np
-from bpy.props import StringProperty, EnumProperty
+from bpy.props import StringProperty, EnumProperty, BoolProperty, FloatProperty
 from bpy.types import Operator, Panel
 
 BAKE_SIZE  = 1024
@@ -575,12 +575,16 @@ class UTILITY_OT_ExtractCosmeticBase(Operator):
     bl_idname = "utility.extract_cosmetic_base"
     bl_label = "Extract Cosmetic Base"
     bl_description = (
-        "Duplicates selection, cleans data, applies 0.98 midlevel displacement, "
+        "Duplicates selection, cleans data, applies adjustable normal displacement, "
         "routes to asset folder, and applies material"
     )
     bl_options = {"REGISTER", "UNDO"}
 
     target_asset: EnumProperty(name="Send To", items=get_target_assets)
+    displacement: FloatProperty(
+        name="Displacement", default=0.02, soft_min=0.0, soft_max=0.2,
+        precision=4, subtype='DISTANCE', unit='LENGTH',
+        description="Offset the extracted mesh along its normals in object-space units. Positive moves outward, zero keeps the original surface, negative moves inward; default 0.02 matches the previous extraction")
 
     @classmethod
     def poll(cls, context):
@@ -594,12 +598,19 @@ class UTILITY_OT_ExtractCosmeticBase(Operator):
         items = [item.name for item in context.scene.tf2_assets if not item.is_library]
         if len(items) == 1:
             self.target_asset = items[0]
-            return self.execute(context)
-        elif len(items) > 1:
-            return context.window_manager.invoke_props_dialog(self)
-        else:
+        elif not items:
             self.target_asset = "NONE"
-            return self.execute(context)
+        return context.window_manager.invoke_props_dialog(self, width=380)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        if any(not item.is_library for item in context.scene.tf2_assets):
+            layout.prop(self, 'target_asset')
+        else:
+            layout.label(text='No asset folder; extract into the current collection.')
+        layout.prop(self, 'displacement')
+        layout.label(text='Positive = outward; 0 = unchanged; negative = inward.')
 
     def execute(self, context):
         orig_obj = context.active_object
@@ -640,13 +651,15 @@ class UTILITY_OT_ExtractCosmeticBase(Operator):
         new_obj.data.materials.clear()
         bpy.ops.object.parent_clear(type="CLEAR_KEEP_TRANSFORM")
 
-        mod = new_obj.modifiers.new(name="Base_Displace", type="DISPLACE")
-        mod.strength = 1.0
-        mod.mid_level = 0.98
-        try:
-            bpy.ops.object.modifier_apply(modifier=mod.name)
-        except Exception as e:
-            self.report({"WARNING"}, f"Could not apply displace modifier: {e}")
+        if self.displacement != 0:
+            mod = new_obj.modifiers.new(name="Base_Displace", type="DISPLACE")
+            mod.direction = 'NORMAL'
+            mod.strength = self.displacement
+            mod.mid_level = 0.0
+            try:
+                bpy.ops.object.modifier_apply(modifier=mod.name)
+            except Exception as e:
+                self.report({"WARNING"}, f"Could not apply displace modifier: {e}")
 
         if self.target_asset and self.target_asset != "NONE":
             target_col_name = self.target_asset + "_lod0"
@@ -760,14 +773,20 @@ class UTILITY_OT_AddArmatureModifier(Operator):
 
 
 class UTILITY_OT_ExportPreviewFBX(Operator):
-    """FBX export for Substance Painter — exports flagged asset lod0 meshes to /bakes/{blend}_substance.fbx."""
+    """Export checked LOD0 meshes and the first reference merc for Substance Painter. Keeps the current pose, without a skeleton. Writes to /bakes/ beside your saved .blend"""
     bl_idname  = "utility.export_preview_fbx"
-    bl_label   = "Export Preview FBX"
+    bl_label   = "Painter Preview FBX"
     bl_options = {"REGISTER"}
 
     @classmethod
     def poll(cls, context):
-        return bpy.data.is_saved and bool(context.scene.tf2_assets)
+        if not bpy.data.is_saved:
+            cls.poll_message_set("Save your .blend before exporting a Painter preview")
+            return False
+        if not context.scene.tf2_assets:
+            cls.poll_message_set("Create a cosmetic asset or spawn a reference merc first")
+            return False
+        return True
 
     def execute(self, context):
         if not bpy.data.is_saved:
@@ -852,6 +871,9 @@ class UTILITY_OT_ExportPreviewFBX(Operator):
 
         self.report({"INFO"},
                     f"Preview FBX exported: {len(export_objs)} meshes → {fbx_path}")
+        if not bpy.app.background:
+            bpy.ops.tf2.export_result("INVOKE_DEFAULT", directory=out_dir,
+                                     message=f"Exported Painter preview ({len(export_objs)} meshes)")
         return {"FINISHED"}
 
 
@@ -859,337 +881,196 @@ class UTILITY_OT_ExportPreviewFBX(Operator):
 #              REPROJECT DIFFUSE — TWO-BUTTON APPROACH         #
 # ============================================================ #
 
-def _reproj_mat_items(self, context):
-    """Enum items: non-eye materials on the reference mesh (first selected,
-    non-active) that have a '$basetexture [texture]' Image Texture node."""
-    sel = [o for o in context.selected_objects if o.type == "MESH"]
-    active = context.active_object
-    ref = next((o for o in sel if o != active), None)
-    if not ref:
-        # Fallback: active itself
-        ref = active
-    if not ref or ref.type != "MESH":
-        return [("NONE", "No mesh found", "")]
-    items = []
-    for slot in ref.material_slots:
-        mat = slot.material
-        if not mat or not mat.use_nodes:
-            continue
-        if "eye" in mat.name.lower():
-            continue
-        if any(n.type == "TEX_IMAGE" and n.label.lower().startswith("$basetexture")
-               for n in mat.node_tree.nodes):
-            items.append((mat.name, mat.name, ""))
-    return items if items else [("NONE", "No $basetexture material found", "")]
+REPROJECT_MAP_TYPES = (
+    ('DIFFUSE', 'Diffuse', 'Reproject reference base color'),
+    ('NORMAL', 'Normal', 'Rebake reference normals into the cosmetic tangent space'),
+    ('SPECULAR', 'Specular', 'Reproject the reference normal texture alpha channel as a grayscale specular map'),
+)
 
 
 class UTILITY_OT_ReprojectDiffuse(Operator):
-    """Reproject diffuse from active to selected."""
+    """Reproject diffuse, normal, or normal-alpha Specular from the reference onto the active cosmetic"""
     bl_idname  = "utility.reproject_diffuse"
-    bl_label   = "Reproject Diffuse"
+    bl_label   = "Reproject Texture"
     bl_options = {"REGISTER", "UNDO"}
 
-    mat_name: EnumProperty(
-        name="Source Material",
-        description="Material on the reference mesh to bake from (eyes excluded)",
-        items=_reproj_mat_items,
-    )
+    map_type: EnumProperty(name='Map', items=REPROJECT_MAP_TYPES, default='DIFFUSE')
+    source_mesh: StringProperty(
+        name='Source Mesh',
+        description='Reference mesh to project from. Hidden meshes and meshes in hidden or excluded collections can be used; the active mesh is the cosmetic target')
+
+    apply_result: BoolProperty(
+        name="Apply to Cosmetic", default=True,
+        description="Connect the result to the matching cosmetic input: Base Color, Normal, or Specular IOR Level; shared materials are copied")
+    show_preview: BoolProperty(
+        name="Open Texture Preview", default=True,
+        description="Open the finished texture in a separate Image Editor window")
+    ray_extrusion: FloatProperty(
+        name="Extrusion", default=1.0, min=0, soft_max=5, subtype='DISTANCE', unit='LENGTH',
+        description="Move ray origins outward along cosmetic normals. Use the smallest distance that covers the reference; large values can hit nearby overlapping surfaces")
+    max_ray_distance: FloatProperty(
+        name="Max Ray Distance", default=0.0, min=0, soft_max=10, subtype='DISTANCE', unit='LENGTH',
+        description="Limit how far projection rays can search. Zero is unlimited; smaller values can reduce distant surface bleeding but may leave unbaked gaps")
 
     @classmethod
     def poll(cls, context):
-        sel = [o for o in context.selected_objects if o.type == "MESH"]
-        return len(sel) == 2 and bpy.data.is_saved
+        if not bpy.data.is_saved:
+            cls.poll_message_set("Save your .blend file before reprojection")
+            return False
+        if context.mode != 'OBJECT':
+            cls.poll_message_set("Switch to Object Mode for reprojection")
+            return False
+        if (context.active_object is None or context.active_object.type != 'MESH'
+                or context.active_object not in context.selected_objects):
+            cls.poll_message_set("Select the cosmetic mesh; choose a reference in the Source Mesh picker")
+            return False
+        return True
 
     def invoke(self, context, event):
-        items = _reproj_mat_items(self, context)
-        if not items or items[0][0] == "NONE":
-            self.report({"ERROR"}, "No $basetexture material found on reference mesh.")
-            return {"CANCELLED"}
-        if len(items) == 1:
-            self.mat_name = items[0][0]
-            return self.execute(context)
-        return context.window_manager.invoke_props_dialog(self)
+        sources = [o for o in context.selected_objects if o.type == 'MESH' and o != context.active_object]
+        if len(sources) == 1:
+            self.source_mesh = sources[0].name
+        return context.window_manager.invoke_props_dialog(self, width=420)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.prop_search(self, 'source_mesh', context.scene, 'objects', text='Source Mesh')
+        layout.label(text=f"Cosmetic: {context.active_object.name}", icon='MESH_DATA')
+        layout.prop(self, 'map_type')
+        if self.map_type == 'NORMAL':
+            layout.prop(context.scene.bake_props, 'swizzle_y', text='Normal Y')
+        elif self.map_type == 'SPECULAR':
+            layout.label(text='Source: normal texture alpha channel')
+        layout.prop(self, 'apply_result')
+        layout.prop(self, 'show_preview')
+        layout.separator()
+        layout.prop(context.scene.bake_props, 'bake_padding', text='Padding (px)')
+        layout.prop(self, 'ray_extrusion')
+        layout.prop(self, 'max_ray_distance')
+        col = layout.column(align=True)
+        col.label(text='For bleeding, try smaller projection distances.')
+        col.label(text='Too small can leave gaps. Ray distance 0 = unlimited.')
 
     def execute(self, context):
-        if not bpy.data.is_saved:
-            self.report({"ERROR"}, "Save the .blend file first.")
-            return {"CANCELLED"}
-
-        sel = [o for o in context.selected_objects if o.type == "MESH"]
-        if len(sel) != 2:
-            self.report({"ERROR"}, "Select exactly 2 meshes.")
-            return {"CANCELLED"}
-
-        target_obj = context.view_layer.objects.active
-        if target_obj not in sel:
-            self.report({"ERROR"}, "Active object must be one of the two selected meshes.")
-            return {"CANCELLED"}
-        source_obj = sel[0] if sel[1] == target_obj else sel[1]
-
-        # ── Rewire ALL non-eye materials on source to Emission ────────── #
-        rewires = []  # [(mat, out_node, prev_target, emit_node, old_surface, base_color_link)]
-
-        for slot in source_obj.material_slots:
-            mat = slot.material
-            if not mat or not mat.use_nodes:
-                continue
-            if "eye" in mat.name.lower():
-                continue
-
-            nodes = mat.node_tree.nodes
-            links = mat.node_tree.links
-
-            basetex = next(
-                (n for n in nodes
-                 if n.type == "TEX_IMAGE" and n.label.lower().startswith("$basetexture")),
-                None,
-            )
-            if not basetex:
-                continue
-
-            bsdf = next((n for n in nodes if n.type == "BSDF_PRINCIPLED"), None)
-            out  = next((n for n in nodes
-                         if n.type == "OUTPUT_MATERIAL" and n.is_active_output), None)
-            if not out:
-                continue
-
-            # Set output target to ALL so Cycles sees it
-            prev_target  = out.target
-            out.target   = "ALL"
-
-            # Cut BSDF → Output Surface
-            old_surface = None
-            for lnk in list(links):
-                if lnk.to_node == out and lnk.to_socket.name == "Surface":
-                    old_surface = (lnk.from_node.name, lnk.from_socket.name)
-                    links.remove(lnk)
-                    break
-
-            # Cut basetexture → BSDF Base Color
-            base_color_link = None
-            if bsdf:
-                for lnk in list(links):
-                    if (lnk.from_node == basetex
-                            and lnk.to_node == bsdf
-                            and lnk.to_socket.name == "Base Color"):
-                        base_color_link = (lnk.from_node.name, lnk.from_socket.name,
-                                           lnk.to_node.name,   lnk.to_socket.name)
-                        links.remove(lnk)
-                        break
-
-            # Wire basetexture → Emission → Output
-            emit          = nodes.new("ShaderNodeEmission")
-            emit.label    = "_wstk_reproj_emit"
-            emit.location = (out.location.x - 220, out.location.y)
-            links.new(basetex.outputs["Color"], emit.inputs["Color"])
-            links.new(emit.outputs["Emission"], out.inputs["Surface"])
-            mat.node_tree.update_tag()
-
-            rewires.append((mat, out, prev_target, emit, old_surface, base_color_link))
-
-        if not rewires:
-            self.report({"ERROR"}, "No materials with $basetexture found on source mesh.")
-            return {"CANCELLED"}
-
-        # ── Create bake image + inject node into target ───────────────── #
-        img_name = f"{target_obj.name}_reproj_diffuse"
-        img = bpy.data.images.get(img_name)
-        if img:
-            bpy.data.images.remove(img)
-        img = bpy.data.images.new(img_name, width=1024, height=1024, alpha=False)
-        img.colorspace_settings.name = "sRGB"
-
-        if not target_obj.data.uv_layers:
-            target_obj.data.uv_layers.new(name="UVMap")
-
-        if not target_obj.data.materials:
-            tmp_mat = bpy.data.materials.new(name=f"{target_obj.name}_bake")
-            tmp_mat.use_nodes = True
-            target_obj.data.materials.append(tmp_mat)
-
-        target_mat = target_obj.data.materials[0]
-        if not target_mat.use_nodes:
-            target_mat.use_nodes = True
-
-        t_nodes = target_mat.node_tree.nodes
-        for n in t_nodes:
-            n.select = False
-
-        bake_node = next(
-            (n for n in t_nodes
-             if n.type == "TEX_IMAGE" and n.label == "_wstk_tmp_bake"), None
-        )
-        created_bake_node = bake_node is None
-        if created_bake_node:
-            bake_node          = t_nodes.new("ShaderNodeTexImage")
-            bake_node.label    = "_wstk_tmp_bake"
-            bake_node.location = (-300, -600)
-
-        bake_node.image  = img
-        bake_node.select = True
-        t_nodes.active   = bake_node
-        target_obj.active_material_index = 0
-
-        # ── Cycles setup ──────────────────────────────────────────────── #
-        scene  = context.scene
-        cycles = scene.cycles
-        prev_engine  = scene.render.engine
-        prev_device  = cycles.device
-        prev_samples = cycles.samples
-        prev_sel     = list(context.selected_objects)
-        prev_active  = context.view_layer.objects.active
-
-        scene.render.engine = "CYCLES"
-        cycles.device        = "GPU"
-        cycles.samples       = 1
-
-        coll_state, obj_state = _force_show([], [source_obj, target_obj])
-
-        bake_ok = False
-        try:
-            bpy.ops.object.select_all(action="DESELECT")
-            source_obj.select_set(True)
-            target_obj.select_set(True)
-            context.view_layer.objects.active = target_obj
-
-            bpy.ops.object.bake(
-                type                   = "EMIT",
-                use_selected_to_active = True,
-                cage_extrusion         = 1.0,
-                margin                 = 4,
-                use_clear              = True,
-            )
-            bake_ok = True
-
-        except Exception as e:
-            self.report({"ERROR"}, f"Bake failed: {e}")
-
-        finally:
-            # ── Restore source materials ──────────────────────────────── #
-            for mat, out, prev_target, emit, old_surface, base_color_link in rewires:
-                r_nodes = mat.node_tree.nodes
-                r_links = mat.node_tree.links
-
-                for lnk in list(r_links):
-                    if lnk.from_node == emit or lnk.to_node == emit:
-                        r_links.remove(lnk)
-                r_nodes.remove(emit)
-
-                out.target = prev_target
-
-                if old_surface:
-                    from_node = r_nodes.get(old_surface[0])
-                    if from_node:
-                        try:
-                            r_links.new(from_node.outputs[old_surface[1]],
-                                        out.inputs["Surface"])
-                        except Exception:
-                            pass
-
-                if base_color_link:
-                    fn, fs, tn, ts = base_color_link
-                    fn = r_nodes.get(fn)
-                    tn = r_nodes.get(tn)
-                    if fn and tn:
-                        try:
-                            r_links.new(fn.outputs[fs], tn.inputs[ts])
-                        except Exception:
-                            pass
-
-            # ── Remove bake node from target ──────────────────────────── #
-            if created_bake_node:
-                try:
-                    target_mat.node_tree.nodes.remove(bake_node)
-                except Exception:
-                    pass
-
-            # ── Restore render / selection ────────────────────────────── #
-            _restore_show(coll_state, obj_state)
-            scene.render.engine = prev_engine
-            cycles.device        = prev_device
-            cycles.samples       = prev_samples
-
-            bpy.ops.object.select_all(action="DESELECT")
-            for o in prev_sel:
-                try:
-                    o.select_set(True)
-                except Exception:
-                    pass
-            context.view_layer.objects.active = prev_active
-
-        if not bake_ok:
-            return {"CANCELLED"}
-
-        # ── Save ──────────────────────────────────────────────────────── #
-        blend_dir = os.path.dirname(bpy.data.filepath)
-        out_dir   = os.path.join(blend_dir, "bakes")
-        os.makedirs(out_dir, exist_ok=True)
-        out_path  = os.path.join(out_dir, f"{img_name}.tga")
-
-        img.filepath_raw = out_path
-        img.file_format  = "TARGA"
-        img.save()
-
-        self.report({"INFO"}, f"Reprojected diffuse saved → {out_path}")
-        return {"FINISHED"}
+        from . import reproject
+        return reproject.execute(self, context)
 
 
 class UTILITY_OT_TransferJiggleHierarchy(Operator):
-    """Sync jiggle_ / j_ bones and their hierarchy across all armatures in the scene"""
+    """Sync j_ / jiggle_ prefixes and _j / _jiggle suffixes across rigs, including hidden rigs. Select the source rig first; its bones take priority. Restores selection and mode"""
     bl_idname  = "utility.transfer_jiggle_hierarchy"
     bl_label   = "Sync Jiggle Bones"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
-        armatures = [obj for obj in bpy.data.objects if obj.type == 'ARMATURE']
-
-        # 1. SCAN PHASE
-        jiggle_registry = {}
-        for arm in armatures:
-            context.view_layer.objects.active = arm
-            bpy.ops.object.mode_set(mode='EDIT')
-            for bone in arm.data.edit_bones:
-                if (bone.name.startswith("jiggle_") or bone.name.startswith("j_")) and bone.parent:
-                    rel_matrix = bone.parent.matrix.inverted() @ bone.matrix
-                    jiggle_registry[bone.name] = {
-                        'parent_name': bone.parent.name,
-                        'rel_matrix':  rel_matrix.copy(),
-                        'length':      bone.length,
-                    }
-            bpy.ops.object.mode_set(mode='OBJECT')
-
-        if not jiggle_registry:
-            self.report({'WARNING'}, "No jiggle bones found.")
+        armatures = [obj for obj in bpy.data.objects
+                     if obj.type == 'ARMATURE' and obj.is_editable and obj.data.is_editable]
+        if len(armatures) < 2:
+            self.report({'WARNING'}, "Need at least two editable armature objects. Mesh vertex groups are not target rigs.")
             return {'CANCELLED'}
 
-        # 2. APPLY PHASE
-        for arm in armatures:
-            context.view_layer.objects.active = arm
-            bpy.ops.object.mode_set(mode='EDIT')
-            edit_bones = arm.data.edit_bones
+        active = context.view_layer.objects.active
+        selected = list(context.selected_objects)
+        mode = active.mode if active else 'OBJECT'
+        states = [(arm, arm.hide_viewport, arm.hide_select,
+                   arm.hide_get() if arm.name in context.view_layer.objects else False)
+                  for arm in armatures]
+        temporary = None
+        created = 0
+        updated = 0
+        try:
+            if mode != 'OBJECT':
+                bpy.ops.object.mode_set(mode='OBJECT')
+            # Read rest bones without entering Edit Mode. Prefer the active
+            # source rig if other rigs already contain older copies.
+            jiggle_registry = {}
+            for arm in sorted(armatures, key=lambda obj: obj == active):
+                for bone in arm.data.bones:
+                    if (bone.name.startswith(("jiggle_", "j_"))
+                            or bone.name.endswith(("_j", "_jiggle"))) and bone.parent:
+                        jiggle_registry[bone.name] = {
+                            'parent_name': bone.parent.name,
+                            'rel_matrix': bone.parent.matrix_local.inverted() @ bone.matrix_local,
+                            'length': bone.length,
+                        }
+            if not jiggle_registry:
+                self.report({'WARNING'}, "No parented jiggle bones found. Use j_name, jiggle_name, name_j or name_jiggle.")
+                return {'CANCELLED'}
 
-            for b_name in jiggle_registry:
-                if b_name not in edit_bones:
-                    edit_bones.new(b_name)
+            temporary = bpy.data.collections.new('_tf2_jiggle_sync_temp')
+            context.scene.collection.children.link(temporary)
+            for arm in armatures:
+                temporary.objects.link(arm)
+                arm.hide_viewport = False
+                arm.hide_select = False
+            context.view_layer.update()
+            for arm in armatures:
+                arm.hide_set(False)
 
-            for b_name, data in jiggle_registry.items():
-                target_bone = edit_bones[b_name]
-                if data['parent_name'] in edit_bones:
-                    target_bone.parent = edit_bones[data['parent_name']]
-                    target_bone.use_connect = False
-                else:
-                    self.report({'WARNING'}, f"Parent {data['parent_name']} not found in {arm.name}")
+            for arm in armatures:
+                # Isolate the target: an active object alone does not reliably
+                # enter Edit Mode, and multi-object editing can affect other rigs.
+                bpy.ops.object.select_all(action='DESELECT')
+                arm.select_set(True)
+                context.view_layer.objects.active = arm
+                bpy.ops.object.mode_set(mode='EDIT')
+                edit_bones = arm.data.edit_bones
+                applicable = {}
+                pending = dict(jiggle_registry)
+                while pending:
+                    progress = False
+                    for name, data in list(pending.items()):
+                        if data['parent_name'] not in edit_bones:
+                            continue
+                        if name not in edit_bones:
+                            edit_bones.new(name)
+                            created += 1
+                        applicable[name] = data
+                        del pending[name]
+                        progress = True
+                    if not progress:
+                        break
+                for name, data in pending.items():
+                    self.report({'WARNING'}, f"Skipped {name} on {arm.name}: parent {data['parent_name']} is missing.")
+                # Resolve parents before children, including longer jiggle chains.
+                ordered = []
+                pending = dict(applicable)
+                while pending:
+                    ready = [name for name, data in pending.items()
+                             if data['parent_name'] not in pending]
+                    if not ready:
+                        break
+                    for name in ready:
+                        ordered.append((name, pending.pop(name)))
+                for name, data in ordered:
+                    bone = edit_bones[name]
+                    bone.use_connect = False
+                    bone.parent = edit_bones[data['parent_name']]
+                    bone.matrix = bone.parent.matrix @ data['rel_matrix']
+                    bone.length = data['length']
+                if applicable:
+                    updated += 1
+                bpy.ops.object.mode_set(mode='OBJECT')
+        finally:
+            if context.object and context.object.mode != 'OBJECT':
+                bpy.ops.object.mode_set(mode='OBJECT')
+            bpy.ops.object.select_all(action='DESELECT')
+            for obj in selected:
+                obj.select_set(True)
+            context.view_layer.objects.active = active
+            if active and mode != 'OBJECT':
+                bpy.ops.object.mode_set(mode=mode)
+            for arm, hidden_viewport, hidden_select, hidden in states:
+                if arm.name in context.view_layer.objects:
+                    arm.hide_set(hidden)
+                arm.hide_viewport = hidden_viewport
+                arm.hide_select = hidden_select
+            if temporary:
+                bpy.data.collections.remove(temporary)
+            context.view_layer.update()
 
-            for _ in range(2):
-                for b_name, data in jiggle_registry.items():
-                    target_bone = edit_bones[b_name]
-                    if target_bone.parent:
-                        target_bone.matrix = target_bone.parent.matrix @ data['rel_matrix']
-                        target_bone.length = data['length']
-
-            bpy.ops.object.mode_set(mode='OBJECT')
-
-        self.report({'INFO'}, f"Jiggle sync complete — {len(jiggle_registry)} bones.")
+        self.report({'INFO'}, f"Jiggle sync: created {created} bones; synced {len(jiggle_registry)} names across {updated} rigs.")
         return {'FINISHED'}
 
 
@@ -1203,6 +1084,9 @@ class UTILITY_PT_Main(Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "WS Toolkit"
+
+    def draw_header(self, context):
+        self.layout.operator("tf2.workflow_help", text="", icon="QUESTION", emboss=False).topic = "UTILITY"
 
     def draw(self, context):
         layout = self.layout
@@ -1222,7 +1106,6 @@ class UTILITY_PT_Main(Panel):
 
         # Row 2: icon strip + expand toggle arrow on the right
         has_assets = any(not i.is_library for i in scene.tf2_assets)
-        sel_meshes = [o for o in context.selected_objects if o.type == "MESH"]
         expanded   = scene.utility_expanded
 
         row = layout.row(align=True)
@@ -1241,8 +1124,8 @@ class UTILITY_PT_Main(Panel):
             sub.operator("utility.export_preview_fbx", text="", icon="EXPORT")
 
             sub = row.row(align=True)
-            sub.enabled = len(sel_meshes) == 2 and bpy.data.is_saved
-            sub.operator("utility.reproject_diffuse", text="", icon="UV_SYNC_SELECT")
+            sub.enabled = UTILITY_OT_ReprojectDiffuse.poll(context)
+            sub.operator("utility.reproject_diffuse", text="", icon="UV_SYNC_SELECT").map_type = scene.reproject_map_type
 
             sub = row.row(align=True)
             sub.operator("utility.transfer_jiggle_hierarchy", text="", icon="BONE_DATA")
@@ -1266,11 +1149,13 @@ class UTILITY_PT_Main(Panel):
 
             row = layout.row()
             row.enabled = bpy.data.is_saved and bool(scene.tf2_assets)
-            row.operator("utility.export_preview_fbx", text="Export Preview FBX", icon="EXPORT")
+            row.operator("utility.export_preview_fbx", text="Painter Preview FBX", icon="EXPORT")
 
-            row = layout.row()
-            row.enabled = len(sel_meshes) == 2 and bpy.data.is_saved
-            row.operator("utility.reproject_diffuse", text="Reproject Diffuse", icon="UV_SYNC_SELECT")
+            row = layout.row(align=True)
+            row.prop(scene, 'reproject_map_type', text='')
+            sub = row.row(align=True)
+            sub.enabled = UTILITY_OT_ReprojectDiffuse.poll(context)
+            sub.operator("utility.reproject_diffuse", text="Reproject", icon="UV_SYNC_SELECT").map_type = scene.reproject_map_type
 
             row = layout.row()
             row.operator("utility.transfer_jiggle_hierarchy", text="Sync Jiggle Bones", icon="BONE_DATA")
@@ -1298,9 +1183,11 @@ def register():
     bpy.types.Scene.utility_expanded = bpy.props.BoolProperty(
         name="Expand Utility Ops", default=False
     )
+    bpy.types.Scene.reproject_map_type = EnumProperty(name='Reproject Map', items=REPROJECT_MAP_TYPES, default='DIFFUSE')
 
 
 def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
     del bpy.types.Scene.utility_expanded
+    del bpy.types.Scene.reproject_map_type

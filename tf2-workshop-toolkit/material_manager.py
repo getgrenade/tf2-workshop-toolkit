@@ -444,6 +444,9 @@ class PRO_MAT_PT_Main(Panel):
     bl_region_type = "UI"
     bl_category = "WS Toolkit"
 
+    def draw_header(self, context):
+        self.layout.operator("tf2.workflow_help", text="", icon="QUESTION", emboss=False).topic = "MATERIALS"
+
     def draw(self, context):
         layout = self.layout
         props = context.scene.pro_mat_props

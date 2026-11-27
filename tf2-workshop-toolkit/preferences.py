@@ -4,6 +4,7 @@ Exposes hotkey remapping in the addon preferences panel.
 """
 
 import bpy
+from . import bl_info
 
 
 class Toolkit_Preferences(bpy.types.AddonPreferences):
@@ -12,6 +13,8 @@ class Toolkit_Preferences(bpy.types.AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
+        version = ".".join(str(part) for part in bl_info["version"])
+        layout.label(text=f"Workshop Toolkit {version}")
         box = layout.box()
         box.label(text="Hotkey Settings", icon="PREFERENCES")
 

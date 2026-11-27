@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Workshop Toolkit",
     "author": "GetGrenade",
-    "version": (1, 0),
+    "version": (1, 4, 0),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > WS Toolkit",
     "description": "Shortcuts and panels for easier tf2 cosmetic pipeline",
@@ -15,6 +15,7 @@ from . import utility
 from . import weight_tools
 from . import preferences
 from . import bake_tools
+from . import workflow_ui
 
 # ============================================================ #
 #                   CORE REGISTRATION                          #
@@ -29,6 +30,7 @@ def register():
     weight_tools.register()
     bake_tools.register()
     preferences.register()
+    workflow_ui.register()
 
     # --- Scene Properties ---
     bpy.types.Scene.tf2_assets = bpy.props.CollectionProperty(
@@ -47,7 +49,7 @@ def register():
     )
     bpy.types.Scene.weight_target_bone = bpy.props.StringProperty(
         name="Target Bone",
-        description="The vertex group to assign 100% weight to",
+        description="Target bone for Assign Selected Weight and Assign All to Target Bone",
         default="bip_head",
     )
 
@@ -77,6 +79,7 @@ def unregister():
     del bpy.types.Scene.weight_smooth_iterations
     del bpy.types.Scene.weight_target_bone
 
+    workflow_ui.unregister()
     preferences.unregister()
     bake_tools.unregister()
     weight_tools.unregister()

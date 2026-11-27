@@ -5,6 +5,8 @@ Vertex weight operations: smooth/limit/normalize, transfer, copy/paste, bone ass
 
 import bpy
 from bpy.types import Operator, Panel, Menu
+from . import weight_experimental
+from . import weight_radius
 
 
 # ============================================================ #
@@ -33,6 +35,9 @@ class WEIGHT_OT_smooth_limit_normalize(bpy.types.Operator):
         if not obj.vertex_groups:
             self.report({"ERROR"}, "Mesh has no vertex groups")
             return {"CANCELLED"}
+
+        if context.scene.weight_soft_radius:
+            return weight_radius.execute_soft_smooth(self, context)
 
         original_mode = obj.mode
         bpy.ops.object.mode_set(mode="WEIGHT_PAINT")
@@ -93,6 +98,94 @@ class WEIGHT_OT_assign_target_bone(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def assign_bone_map(original, target, value, amount, locked):
+    """Pin the requested target value before allocating the remaining slots."""
+    target_value = original.get(target, 0.0) * (1 - amount) + value * amount
+    if target in locked:
+        raise ValueError('Target bone group is locked. Unlock it before assigning.')
+    if target_value < 1.0 and not any(g != target and w > 0 for g, w in original.items()):
+        raise ValueError('Cannot assign a partial weight without other bone weights. Rig these vertices first.')
+    pinned = dict(locked)
+    # Pin zero too, so an existing target membership is removed.
+    pinned[target] = target_value
+    result = weight_experimental.constrain(original, pinned)
+    if abs(sum(result.values()) - 1.0) > 1e-6:
+        raise ValueError('Cannot assign a partial weight without other bone weights. Rig these vertices first.')
+    return result
+
+
+class WEIGHT_OT_assign_selected_bone(bpy.types.Operator):
+    """Set target bone weight on selected vertices, with optional Soft Radius; preserve locks, normalize and limit to 3 deform influences"""
+    bl_idname = 'mesh.assign_selected_bone_weight'
+    bl_label = 'Assign Selected Weight'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return (context.object is not None and context.object.type == 'MESH'
+                and context.object.mode == 'EDIT')
+
+    def execute(self, context):
+        obj = context.object
+        name = context.scene.weight_target_bone.strip()
+        if not name:
+            self.report({'ERROR'}, 'Target bone name cannot be empty.')
+            return {'CANCELLED'}
+        if obj.data.users > 1 or not obj.data.is_editable or not obj.is_editable:
+            self.report({'ERROR'}, 'Assignment needs editable, single-user mesh data.')
+            return {'CANCELLED'}
+        rigs = [m.object for m in obj.modifiers if m.type == 'ARMATURE' and m.object]
+        if rigs and not any(b.name == name and b.use_deform for rig in rigs for b in rig.data.bones):
+            self.report({'ERROR'}, f'{name} is not a deform bone on this mesh\'s armature.')
+            return {'CANCELLED'}
+        group = obj.vertex_groups.get(name)
+        if group is not None and group.lock_weight:
+            self.report({'ERROR'}, 'Target bone group is locked. Unlock it before assigning.')
+            return {'CANCELLED'}
+        created = False
+        original = None
+        plan = {}
+        try:
+            # Read the same displayed cage as the radius preview before writing.
+            coords, edges, _, visible, seeds = weight_radius.geometry(obj, context)
+            if not seeds:
+                raise ValueError('Select vertices to assign the target bone weight.')
+            if context.scene.weight_soft_radius:
+                _, amounts, _ = weight_radius.soft_region(
+                    coords, edges, visible, seeds, context.scene.weight_soft_distance)
+            else:
+                amounts = [1.0 if i in seeds else 0.0 for i in range(len(coords))]
+            bpy.ops.object.mode_set(mode='OBJECT')
+            if group is None:
+                group = obj.vertex_groups.new(name=name)
+                created = True
+            indices = weight_experimental.group_indices(obj)
+            original = weight_experimental.read_weights(obj, indices)
+            locked = {g.index for g in obj.vertex_groups if g.index in indices and g.lock_weight}
+            # Validate every vertex before applying any changes.
+            plan = {i: assign_bone_map(original[i], group.index, context.scene.weight_assign_value,
+                                       amount, {g: original[i].get(g, 0) for g in locked})
+                    for i, amount in enumerate(amounts) if amount > 0}
+            try:
+                weight_experimental.write_maps(obj, plan, indices)
+            except Exception:
+                weight_experimental.write_maps(obj, {i: original[i] for i in plan}, indices)
+                raise
+            obj.vertex_groups.active_index = group.index
+            self.report({'INFO'}, f'Assigned {name}: {context.scene.weight_assign_value:g} on selection; '
+                        f'{len(plan)} vertices, normalized, max 3 deform weights.')
+            return {'FINISHED'}
+        except Exception as error:
+            if created:
+                obj.vertex_groups.remove(group)
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
+        finally:
+            if obj.mode != 'EDIT':
+                bpy.ops.object.mode_set(mode='EDIT')
+            context.view_layer.update()
+
+
 class WEIGHT_OT_quick_weight_transfer(bpy.types.Operator):
     """Transfer weights safely by temporarily bypassing active poses"""
     bl_idname = "object.quick_weight_transfer"
@@ -100,6 +193,8 @@ class WEIGHT_OT_quick_weight_transfer(bpy.types.Operator):
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
+        if context.scene.weight_soft_radius:
+            return weight_radius.execute_soft_transfer(self, context)
         selected = context.selected_objects
         active_obj = context.active_object
         meshes = [obj for obj in selected if obj.type == "MESH"]
@@ -275,6 +370,9 @@ class WEIGHT_PT_Main(bpy.types.Panel):
     bl_region_type = "UI"
     bl_category = "WS Toolkit"
 
+    def draw_header(self, context):
+        self.layout.operator("tf2.workflow_help", text="", icon="QUESTION", emboss=False).topic = "WEIGHTS"
+
     def draw(self, context):
         layout = self.layout
 
@@ -290,6 +388,10 @@ class WEIGHT_PT_Main(bpy.types.Panel):
             WEIGHT_OT_assign_target_bone.bl_idname, text="", icon="BONE_DATA"
         )
         row.prop(context.scene, "weight_target_bone", text="")
+
+        row = layout.row(align=True)
+        row.operator(WEIGHT_OT_assign_selected_bone.bl_idname, text="Assign Selected", icon="BONE_DATA")
+        row.prop(context.scene, "weight_assign_value", text="Weight")
 
         # Row 2: Transfer | Smooth [count]
         row = layout.row(align=True)
@@ -307,6 +409,15 @@ class WEIGHT_PT_Main(bpy.types.Panel):
         sub.scale_x = 0.55
         sub.prop(context.scene, "weight_smooth_iterations", text="")
 
+        row = layout.row(align=True)
+        row.prop(context.scene, "weight_soft_radius", text="Soft Radius")
+        if context.scene.weight_soft_radius:
+            row.prop(context.scene, "weight_soft_distance", text="Radius")
+
+        row = layout.row(align=True)
+        row.operator("object.distance_weight_transfer", text="Distance Transfer", icon="MOD_DATA_TRANSFER")
+        row.operator("object.weight_smooth_gradient", text="Smooth Gradient", icon="MOD_SMOOTH")
+
 
 class WEIGHT_MT_pie_menu(bpy.types.Menu):
     bl_label = "Weight Tools"
@@ -317,9 +428,15 @@ class WEIGHT_MT_pie_menu(bpy.types.Menu):
         pie.operator("object.quick_weight_transfer", text="Quick Transfer", icon="MOD_DATA_TRANSFER")
         pie.operator("object.weight_smooth_limit_normalize", text="Smooth", icon="MOD_SMOOTH")
         pie.operator("object.assign_target_bone", text="Assign Target Bone", icon="BONE_DATA")
+        pie.operator("object.distance_weight_transfer", text="Distance Transfer (Experimental)", icon="MOD_DATA_TRANSFER")
+        pie.operator("object.weight_smooth_gradient", text="Smooth Gradient", icon="MOD_SMOOTH")
         col = pie.column()
         col.operator("mesh.copy_vertex_weights", text="Copy Weight", icon="COPYDOWN")
         col.operator("mesh.paste_vertex_weights", text="Paste Weight", icon="PASTEDOWN")
+        col = pie.column(align=True)
+        col.prop(context.scene, "weight_target_bone", text="Bone")
+        col.prop(context.scene, "weight_assign_value", text="Weight")
+        col.operator("mesh.assign_selected_bone_weight", text="Assign Selected", icon="BONE_DATA")
 
 
 # ============================================================ #
@@ -329,6 +446,7 @@ class WEIGHT_MT_pie_menu(bpy.types.Menu):
 classes = (
     WEIGHT_OT_smooth_limit_normalize,
     WEIGHT_OT_assign_target_bone,
+    WEIGHT_OT_assign_selected_bone,
     WEIGHT_OT_quick_weight_transfer,
     WEIGHT_OT_copy_vertex_weights,
     WEIGHT_OT_paste_vertex_weights,
@@ -338,10 +456,18 @@ classes = (
 
 
 def register():
+    bpy.types.Scene.weight_assign_value = bpy.props.FloatProperty(
+        name='Weight', default=0.25, min=0.0, max=1.0,
+        description='Final target bone weight on selected vertices. Soft Radius blends nearby weights toward this value; remaining bone weights share the remainder, max 3 influences')
+    weight_experimental.register()
+    weight_radius.register()
     for cls in classes:
         bpy.utils.register_class(cls)
 
 
 def unregister():
+    del bpy.types.Scene.weight_assign_value
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+    weight_experimental.unregister()
+    weight_radius.unregister()

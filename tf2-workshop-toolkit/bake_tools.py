@@ -937,6 +937,9 @@ class BAKE_PT_Main(bpy.types.Panel):
     bl_region_type = "UI"
     bl_category    = "WS Toolkit"
 
+    def draw_header(self, context):
+        self.layout.operator("tf2.workflow_help", text="", icon="QUESTION", emboss=False).topic = "BAKE"
+
     def draw(self, context):
         layout = self.layout
         props  = context.scene.bake_props
